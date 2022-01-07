@@ -1,0 +1,354 @@
+---
+title: "NYC 311 SERVICE REQUEST"
+author: "Nuno Fernandes"
+date: "31/10/2021"
+output: github_document
+always_allow_html: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Import Libraries
+```{r, echo=FALSE,warning=FALSE, message=FALSE, results=FALSE}
+packages <- c("dlookr","Hmisc","funModeling","tidyverse","lubridate","ggplot2","hrbrthemes","xts","fpp2","TSstudio","forecast","shiny","shinyWidgets","shinythemes","plotly")
+
+installed_packages <- packages %in% row.names(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed.packages])
+}
+
+lapply(packages, library, character.only = TRUE)
+```
+
+### read csv
+```{r}
+df<-read.csv("C:\\Users\\nunok\\Documents\\Msc Data Science\\data_viz\\project\\Customer_Service_Module.csv")
+```
+
+# Preprocessing
+
+### convert char to Date and create duration var
+```{r}
+df$created_as_time <- parse_date_time(df$Created.Date, '%m/%d/%Y %I:%M:%S %p')
+df$closed_as_time  <- parse_date_time(df$Closed.Date, '%m/%d/%Y %I:%M:%S %p')
+
+df$duration_time   <- as.numeric(difftime(df$closed_as_time, df$created_as_time)) 
+```
+
+#### mean of duration to solve per day of the call
+```{r}
+#created_as_time convert to Date
+df$Date <- as.Date(df$created_as_time)
+
+
+df%>%
+  group_by(df$Date)%>%
+  mutate(mean_duration = mean(duration_time, na.rm = T))%>%
+  distinct(Date, .keep_all = T) -> df_ts
+```
+
+### time series incident resolution time
+```{r}
+#time series of duration to solve per date
+ts_a <- xts(x = df_ts$mean_duration, order.by = df_ts$Date)
+```
+
+
+### mean of duration until solved issue & number of calls per day 
+```{r}
+#if duration<0 => NA
+df_ts2 <- df
+df_ts2$duration_time[df_ts2$duration_time <0] <- NA
+
+
+#created_as_time convert to Date
+df_ts2$Date <- as.Date(df_ts2$created_as_time)
+
+#compute mean duration & number of calls per day and filter
+df_ts2%>%
+  group_by(Date)%>%
+  mutate(mean_duration = mean(duration_time, na.rm = T))%>%
+  mutate(number = n())%>%
+  distinct(Date, .keep_all = T) -> df_ts2
+
+#to xts duration daily time series
+ts_duration <- xts(x = df_ts2$mean_duration, order.by = df_ts2$Date)
+
+#to xts number of call daily time series
+ts_number <- xts(x = df_ts2$number, order.by = df_ts2$Date)
+```
+
+# Exploratory analysis
+
+### convert xts to monthly ts time series 
+```{r, echo=FALSE, warning=FALSE}
+#convert xts duration to ts weekly time series
+ts_monthly_duration <- to.monthly(ts_duration)
+ts_monthly_duration <- xts_to_ts(ts_monthly_duration)
+
+#convert xts number of call to ts time series
+ts_monthly_number <- to.monthly(ts_number)
+ts_monthly_number <- xts_to_ts(ts_monthly_number)
+
+#plot
+#autoplot(ts_monthly_duration)
+#autoplot(ts_monthly_number)
+```
+### convert to weekly time series
+```{r, echo=FALSE, warning=FALSE}
+#convert xts duration to ts weekly time series
+ts_weekly_duration <- to.weekly(ts_duration)
+ts_weekly_duration <- xts_to_ts(ts_weekly_duration)
+
+#convert xts number of call to ts time series
+ts_weekly_number <- to.weekly(ts_number)
+ts_weekly_number <- xts_to_ts(ts_weekly_number)
+
+#plot
+#autoplot(ts_weekly_duration)
+#autoplot(ts_weekly_number)
+```
+### find weeks that seem to be an outliers
+```{r}
+#duration
+#boxplot(ts_weekly_duration)
+#tail(sort(ts_weekly_duration))
+which(ts_weekly_duration==c(22030800, 29073600))
+
+#number
+#boxplot(ts_weekly_number)
+#head(sort(ts_weekly_number))
+which(ts_weekly_number==1)
+
+```
+### mean imputation(mean of previous and following week) & convert duration s to hr
+```{r}
+#duration
+ts_weekly_duration[c(499,500)] <- mean(ts_weekly_duration[c(498,501)])
+ts_weekly_duration[325] <- mean(ts_weekly_duration[c(324,326)])
+
+#mean
+ts_weekly_number[c(498,499, 500)] <- mean(ts_weekly_number[c(497,501)])
+
+#duration from s to hours
+ts_weekly_duration <- ts_weekly_duration/3600
+
+```
+
+### plot
+```{r}
+autoplot(cbind(ts_weekly_number,ts_weekly_duration))
+```
+
+### to percentage
+```{r} 
+#duration
+ts_weekly_duration_percentage <- ((ts_weekly_duration - min(ts_weekly_duration))/(max(ts_weekly_duration)-min(ts_weekly_duration)))*100
+
+#number
+ts_weekly_number_percentage <- ((ts_weekly_number - min(ts_weekly_number))/(max(ts_weekly_number)-min(ts_weekly_number)))*100
+
+```
+
+### auto-arima duration
+``` {r}
+fit_duration <- auto.arima(ts_weekly_duration_percentage)
+checkresiduals(fit_duration)
+autoplot(fit_duration)
+#autoplot(forecast(fit))
+plot(fit_duration$x)
+lines(fitted(fit_duration),col="blue")
+```
+
+### auto-arima number
+``` {r}
+# autoArima number
+fit_number <- auto.arima(ts_weekly_number_percentage)
+checkresiduals(fit_number)
+autoplot(fit_number)
+#autoplot(forecast(fit))
+plot(fit_number$x)
+lines(fitted(fit_number),col="blue")
+```
+
+### Bind the two plots
+```{r}
+autoplot(cbind(ts_weekly_number_percentage, ts_weekly_duration_percentage, fitted(fit_number), fitted(fit_duration) )) + ggtitle("Title") + labs(x = "Time", y= " Relative frequency (%)")
+```
+
+```{r}
+number <- fitted(fit_number)
+duration <-  fitted(fit_duration)
+
+autoplot(cbind(number, duration)) + ggtitle("Weekly 311 calls") + labs(x = "Time", y= "Percentage of change") + scale_y_continuous(expand = c(0, 0), breaks = c(0,10,20,30,40,50,60,70)) + coord_cartesian(ylim=c(0, 70))+ theme(panel.grid.minor.y = element_blank(),
+panel.grid.minor.x = element_blank(),panel.grid.major.x = element_blank() ) + theme(axis.line.x = element_line(colour = 'black', size=0.5, linetype='solid'),
+                                               axis.line.y = element_line(colour = 'black', size=0.5, linetype='solid')) +     scale_x_continuous(n.breaks = 10)
+  
+```
+
+### ts to dataframe
+```{r}
+#ts to dataframe
+df_duration <- fortify(ts_weekly_duration)
+df_number <- fortify(ts_weekly_number)
+
+#df to ts
+ts_duration <- ts(df_duration)
+ts_number <- ts(df_number)
+```
+
+### Why this decreasing trend in the duration since covid? Inspect number of cases/type and duration per case
+
+### When was this sudden rise in calls? 
+```{r}
+#summary(df_ts2$number)
+which(df_ts2$number>=3570)
+df_ts2[2875,"Date"]
+```
+
+#seasonal plot
+```{r}
+ggmonthplot(ts_monthly_duration)+
+  ylab("duration") +
+  ggtitle("Seasonal plot: duration ")
+
+ggmonthplot(ts_monthly_number)+
+  ylab("number") +
+  ggtitle("Seasonal plot: number ")
+
+```
+
+# weekly plot of n() Water Quality
+```{r}
+df_water = subset(df, Complaint.Type == "Water Quality")
+
+df_water%>%
+  group_by(Date)%>%
+  mutate(number = n())%>% 
+  distinct(Date, .keep_all = T) -> df_water_
+
+ts_water_ <- xts(x = df_water_$number, order.by = df_water_$Date)
+
+ts_weekly_water <- to.weekly(ts_water_)
+ts_weekly_water <- xts_to_ts(ts_weekly_water)
+
+autoplot(ts_weekly_water) +  ggtitle("Weekly 311 Water Quality Complaints") + labs(x = "Year", y= "Number") + scale_y_continuous(expand = c(0, 0), breaks = c(0,10,20,30,40,50)) + coord_cartesian(ylim=c(0, 60))+ theme(panel.grid.minor.y = element_blank(),
+panel.grid.minor.x = element_blank(),panel.grid.major.x = element_blank() ) + theme(axis.line.x = element_line(colour = 'black', size=0.5, linetype='solid'),
+                                               axis.line.y = element_line(colour = 'black', size=0.5, linetype='solid')) +     scale_x_continuous(n.breaks = 10) + geom_line(colour = "darkgoldenrod")
+
+```
+# weekly plot of n() noise
+```{r}
+df_water = subset(df, Complaint.Type == "Noise")
+
+df_water%>%
+  group_by(Date)%>%
+  mutate(number = n())%>% 
+  distinct(Date, .keep_all = T) -> df_water_
+
+ts_water_ <- xts(x = df_water_$number, order.by = df_water_$Date)
+
+ts_weekly_water <- to.weekly(ts_water_)
+ts_weekly_water <- xts_to_ts(ts_weekly_water)
+
+autoplot(ts_weekly_water) +  ggtitle("Weekly 311 Noise complaints") + labs(x = "Year", y= "Number") + scale_y_continuous(expand = c(0, 0), breaks = c(0,50,100,150,200,250)) + coord_cartesian(ylim=c(0, 300))+ theme(panel.grid.minor.y = element_blank(),
+panel.grid.minor.x = element_blank(),panel.grid.major.x = element_blank() ) + theme(axis.line.x = element_line(colour = 'black', size=0.5, linetype='solid'),
+                                               axis.line.y = element_line(colour = 'black', size=0.5, linetype='solid')) +     scale_x_continuous(n.breaks = 7) + geom_line(colour = "blueviolet")
+
+```
+
+
+# Create a data frame with one Borough
+```{r, warning=FALSE}
+
+#remove rows for unspecified Boroughs
+c <- c("BRONX", "BROOKLYN", "MANHATTAN", "QUEENS", "STATEN ISLAND")
+
+df %>% filter(Borough %in% c) -> df
+
+#df$Borough[df$Borough == "STATEN ISLAND"] <- "STATEN_ISLAND"
+
+# BRONX first
+df_bronx = subset(df, Borough == "BRONX")
+
+df_ = subset(df_bronx, Complaint.Type == "Water System")
+
+#compute mean duration & number of calls per day and filter
+df_%>%
+  group_by(Date)%>%
+  mutate(number = n())%>% 
+  distinct(Date, .keep_all = T) -> df_new
+
+df_new$type = "Water System"
+df_new$borough = "BRONX"
+
+c = c("Noise", "Air Quality", "Lead", "Water Conservation", "Hazardous Materials", "Water Quality", "Sewer")
+
+for (i in c){
+  
+  df_ = subset(df_bronx, Complaint.Type == i)
+  #compute mean duration & number of calls per day and filter
+  df_%>%
+    group_by(Date)%>%
+    mutate(number = n()) %>% 
+    distinct(Date, .keep_all = T) -> df_
+
+  df_$type = i
+  df_$borough = "BRONX"
+  
+  #rbind df
+  df_new = rbind(df_new, df_)
+  
+}
+```
+
+### Bind next Boroughs 
+```{r}
+list_borough <- c("BROOKLYN", "MANHATTAN", "STATEN ISLAND", "QUEENS")
+
+list_complaint = c("Water System", "Noise", "Air Quality", "Lead", "Water Conservation", "Hazardous Materials", "Water Quality", "Sewer")
+
+#outer-loop
+for (borough in list_borough){
+  df_ = subset(df, Borough == borough)
+  #inner-loop
+    for (complaint in list_complaint){
+      df_2 = subset(df_, Complaint.Type == complaint)
+        #compute mean duration & number of calls per day and filter
+        df_2%>%
+          group_by(Date)%>%
+          mutate(number = n()) %>% 
+          distinct(Date, .keep_all = T) -> df_2
+        
+        df_2$type = complaint
+        df_2$borough = borough
+        
+        #rbind df
+        df_new = rbind(df_new, df_2)
+      
+    }
+}
+
+```
+
+
+# Plotly
+```{r}
+
+       ggplotly(df_new %>% filter(borough == "BROOKLYN") %>% 
+                     ggplot(aes(Date, number, colour = Complaint.Type)) +  geom_line(size = 1, alpha = .9) +
+                       #uncomment line below to show area under curves
+                       #geom_area(aes(fill = symbol),position="identity",alpha=.2) +
+                           theme_minimal(base_size=16) +
+                           theme(axis.title = element_blank(),
+                           plot.background  = element_rect(fill = "black"),
+                           panel.background = element_rect(fill = "black"),
+                           panel.grid       = element_blank(),
+                           legend.text      = element_text(colour = "white")) 
+                ) 
+  
+
+```
+

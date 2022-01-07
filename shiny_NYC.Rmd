@@ -1,0 +1,205 @@
+---
+title: "shiny_NYC"
+author: "Nuno Fernandes"
+date: "07/01/2022"
+output: html_document
+runtime: shiny
+---
+
+
+### Import Libraries
+```{r, echo=FALSE,warning=FALSE, message=FALSE, results=FALSE}
+packages <- c("dlookr","Hmisc","funModeling","tidyverse","lubridate","ggplot2","hrbrthemes","xts","fpp2","TSstudio","forecast","shiny","shinyWidgets","shinythemes","plotly")
+
+installed_packages <- packages %in% row.names(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed.packages])
+}
+
+lapply(packages, library, character.only = TRUE)
+```
+
+
+### read csv
+```{r}
+df<-read.csv("C:\\Users\\nunok\\Documents\\Msc Data Science\\data_viz\\project\\Customer_Service_Module.csv")
+
+
+# Shiny APP
+#https://towardsdatascience.com/monitoring-stock-performance-made-easy-with-r-and-shiny-b6ab5fb02085
+### Create a data frame with one Borough
+
+df$Date <- as.Date(parse_date_time(df$Created.Date, '%m/%d/%Y %I:%M:%S %p'))
+
+#remove rows for unspecified Boroughs
+c <- c("BRONX", "BROOKLYN", "MANHATTAN", "QUEENS", "STATEN ISLAND")
+
+df %>% filter(Borough %in% c) -> df
+
+#df$Borough[df$Borough == "STATEN ISLAND"] <- "STATEN_ISLAND"
+
+# BRONX first
+df_bronx = subset(df, Borough == "BRONX")
+
+df_ = subset(df_bronx, Complaint.Type == "Water System")
+
+#compute mean duration & number of calls per day and filter
+df_%>%
+  group_by(Date)%>%
+  mutate(number = n())%>% 
+  distinct(Date, .keep_all = T) -> df_new
+
+df_new$type = "Water System"
+df_new$borough = "BRONX"
+
+c = c("Noise", "Air Quality", "Lead", "Water Conservation", "Hazardous Materials", "Water Quality", "Sewer")
+
+for (i in c){
+  
+  df_ = subset(df_bronx, Complaint.Type == i)
+  #compute mean duration & number of calls per day and filter
+  df_%>%
+    group_by(Date)%>%
+    mutate(number = n()) %>% 
+    distinct(Date, .keep_all = T) -> df_
+
+  df_$type = i
+  df_$borough = "BRONX"
+  
+  #rbind df
+  df_new = rbind(df_new, df_)
+  
+}
+```
+
+### Bind next Boroughs 
+```{r}
+list_borough <- c("BROOKLYN", "MANHATTAN", "STATEN ISLAND", "QUEENS")
+
+list_complaint = c("Water System", "Noise", "Air Quality", "Lead", "Water Conservation", "Hazardous Materials", "Water Quality", "Sewer")
+
+#outer-loop
+for (borough in list_borough){
+  df_ = subset(df, Borough == borough)
+  #inner-loop
+    for (complaint in list_complaint){
+      df_2 = subset(df_, Complaint.Type == complaint)
+        #compute mean duration & number of calls per day and filter
+        df_2%>%
+          group_by(Date)%>%
+          mutate(number = n()) %>% 
+          distinct(Date, .keep_all = T) -> df_2
+        
+        df_2$type = complaint
+        df_2$borough = borough
+        
+        #rbind df
+        df_new = rbind(df_new, df_2)
+      
+    }
+}
+
+```
+
+
+# Shiny App
+```{r}
+
+tickers <- c("Water System", "Noise", "Air Quality", "Lead", "Water Conservation", "Hazardous Materials", "Water Quality", "Sewer")
+
+# UI #
+ui <- fluidPage(theme = shinytheme("cyborg"),
+                
+                #Title
+                titlePanel("NYC 311"),
+                
+                #Sidebar
+                sidebarLayout(
+                  
+                    sidebarPanel(width = 3,
+                                 
+                        #Borough
+                        radioButtons(
+                           inputId = "Borough", 
+                           label   = h4("Borough"),
+                           choices = list("BROOKLYN", "MANHATTAN", "QUEENS", "STATEN ISLAND","BRONX"), 
+                           selected = "BROOKLYN"
+                                      ),
+                  
+                        #Incidents
+                        pickerInput(    
+                                    inputId = "incident",
+                                    label   = h4("Incidents"),
+                                    choices = c(
+                                    "Water System"          = tickers[1],
+                                    "Noise"                 = tickers[2],
+                                    "Air Quality"           = tickers[3], 
+                                    "Lead"                  = tickers[4],
+                                    "Water Conservation"    = tickers[5],
+                                    "Hazardous Materials"   = tickers[6],
+                                    "Water Quality"         = tickers[7],
+                                    "Sewer"                 = tickers[8]),
+                                    selected = tickers,   
+                                    options = list(`actions-box` = TRUE), 
+                                    multiple = T
+                                    ),
+                        
+                        # Date selector 
+                        dateRangeInput(
+                          inputId = "dates",
+                          label = h3("Date range"),
+                          start = "2015-04-15",
+                          end = "2018-04-16",
+                          min = "2010-01-01",
+                          max = "2021-10-18"),
+                      
+                        hr(),
+                        fluidRow(column(4, verbatimTextOutput("value")))
+                      ),
+                    
+
+                    mainPanel(
+                      plotlyOutput("plot", height=800)
+                    )
+            )
+)
+
+# Server #
+
+server <- function(input, output) {
+  
+  observeEvent(c(input$Borough, input$incident, input$dates), {
+    
+      
+    
+  # filter incidents, borough and time interval
+    dfInput <- reactive({
+                  df_new %>%
+                  filter(borough == input$Borough & 
+                         type %in% input$incident &
+                         Date >= input$dates[1] & 
+                         Date <= input$dates[2])
+    })
+
+
+    #plot
+    output$plot <- renderPlotly({
+       df1 <- dfInput()
+       ggplotly(df1 %>%
+                     ggplot(aes(Date, number, colour = Complaint.Type)) +  geom_line(size = 1, alpha = .9) +
+                       #uncomment line below to show area under curves
+                       #geom_area(aes(fill = symbol),position="identity",alpha=.2) +
+                           theme_minimal(base_size=16) +
+                           theme(axis.title = element_blank(),
+                           plot.background  = element_rect(fill = "black"),
+                           panel.background = element_rect(fill = "black"),
+                           panel.grid       = element_blank(),
+                           legend.text      = element_text(colour = "white"))
+                )
+   })
+    })
+}
+
+shinyApp(ui = ui, server = server)
+  
+```
